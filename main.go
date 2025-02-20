@@ -1580,7 +1580,9 @@ func genAccountGettersSetters(
 
 			var seedProgramValue *[]byte
 			if account.PDA.Program != nil {
-				if account.PDA.Program.Value == nil {
+				if account.PDA.Program.Kind == "account" || account.PDA.Program.Kind == "arg" {
+					// todo handle account and arg
+				} else if account.PDA.Program.Value == nil {
 					panic("cannot handle non-const type program value in PDA seeds" + account.Address)
 				}
 				seedProgramValue = &account.PDA.Program.Value
