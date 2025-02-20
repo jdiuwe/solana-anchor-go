@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
-	"github.com/gagliardetto/solana-go"
 	"io/ioutil"
 	"os"
 	"path"
@@ -14,12 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/davecgh/go-spew/spew"
+	"github.com/gagliardetto/solana-go"
+
+	"github.com/dave/jennifer/jen"
 	. "github.com/dave/jennifer/jen"
-	"github.com/fragmetric-labs/solana-anchor-go/sighash"
 	bin "github.com/gagliardetto/binary"
 	. "github.com/gagliardetto/utilz"
+	"github.com/henrymbaldwin/solana-anchor-go/sighash"
 	"golang.org/x/mod/modfile"
 )
 
@@ -343,7 +344,6 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 
 	{
 		file := NewGoFile(idl.Metadata.Name, true)
-
 		// Declare account layouts from IDL:
 		for _, evt := range idl.Events {
 			if _, ok := defs[evt.Name]; ok {
@@ -379,9 +379,7 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("strings", "Builder").Op("=").Nil()))
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil()))
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil())) // TODO: ..
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc", "GetTransactionResult").Op("=").Nil()))
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("github.com/mr-tron/base58", "Alphabet").Op("=").Nil()))
-
+		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil()))
 		file.Add(Empty().Id(`
 type Event struct {
 	Name string
@@ -776,6 +774,61 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 				})
 			file.Add(code.Line())
 		}
+		{
+			builderFuncName := formatBuilderFuncName(insExportedName) + "Ext"
+			code := Empty()
+			code.Commentf(
+				"%s creates a new `%s` instruction builder.",
+				builderFuncName,
+				insExportedName,
+			).Line()
+			//
+			code.Func().Id(builderFuncName).Params(Id("remainingAccounts").Int()).Op("*").Id(insExportedName).
+				BlockFunc(func(body *Group) {
+					body.Id("nd").Op(":=").Op("&").Id(insExportedName).Block(
+						Id("AccountMetaSlice").Op(":").Make(Qual(PkgSolanaGo, "AccountMetaSlice"), Lit(instruction.Accounts.NumAccounts()).Op("+").Id("remainingAccounts")).Op(","),
+					)
+
+					// Set sysvar accounts and constant accounts:
+					instruction.Accounts.Walk("", nil, nil, func(parentGroupPath string, index int, parentGroup *IdlAccounts, account *IdlAccount) bool {
+						if isVar(account.Name) {
+							pureVarName := getSysVarName(account.Name)
+							is := isSysVar(pureVarName)
+							if is {
+								_, ok := sysVars[pureVarName]
+								if !ok {
+									panic(account)
+								}
+								def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, pureVarName))
+								if account.Writable {
+									def.Dot("WRITE").Call()
+								}
+								if account.Signer {
+									def.Dot("SIGNER").Call()
+								}
+								body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
+							} else {
+								panic(account)
+							}
+						} else if account.Address != "" {
+							//def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, "MustPublicKeyFromBase58").Call(Lit(account.Address)))
+							def := Qual(PkgSolanaGo, "Meta").Call(Id("Addresses").Index(Lit(account.Address)))
+							addresses[account.Address] = account.Address
+							if account.Writable {
+								def.Dot("WRITE").Call()
+							}
+							if account.Signer {
+								def.Dot("SIGNER").Call()
+							}
+							body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
+						}
+						return true
+					})
+
+					body.Return(Id("nd"))
+				})
+			file.Add(code.Line())
+		}
 
 		{
 			// Declare methods that set the parameters of the instruction:
@@ -912,12 +965,33 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 						lowerAccountName,
 						instruction.Accounts,
 						addresses,
+						instruction.Args,
+						&idl,
 					))
 					groupMemberIndex++
 				}
 				return true
 			})
 
+			file.Add(code.Line())
+		}
+		{
+			// Declare `AddRemainingAccounts` method on instruction:
+			code := Empty()
+
+			code.Line().Line().Func().Params(Id("inst").Op("*").Id(insExportedName)).Id("AddRemainingAccounts").Params(
+				Id("remainingAccounts").Index().Qual(PkgSolanaGo, "PublicKey"),
+			).Params(Op("*").Id(insExportedName)).
+				Block(
+					jen.Id("accounts").Op(":=").Lit(instruction.Accounts.NumAccounts()),
+					jen.For(
+						jen.Id("i").Op(",").Id("_").Op(":=").Range().Id("remainingAccounts"),
+					).Block(
+						jen.Id("index").Op(":=").Id("accounts").Op("+").Id("i"),
+						jen.Id("inst").Dot("AccountMetaSlice").Index(jen.Id("index")).Op("=").Qual(PkgSolanaGo, "Meta").Call(jen.Id("remainingAccounts").Index(jen.Id("i"))).Dot("WRITE").Call(),
+					),
+					Return(Id("inst")),
+				)
 			file.Add(code.Line())
 		}
 		{
@@ -1406,6 +1480,8 @@ func genAccountGettersSetters(
 	lowerAccountName string,
 	accounts []IdlAccountItem,
 	addresses map[string]string,
+	args []IdlField,
+	idl *IDL,
 ) Code {
 	code := Empty()
 
@@ -1500,12 +1576,12 @@ func genAccountGettersSetters(
 			// find seeds
 			seedValues := make([][]byte, len(account.PDA.Seeds))
 			seedRefs := make([]string, len(account.PDA.Seeds))
-			seedArgs := make([]string, len(account.PDA.Seeds))
+			seedTypes := make([]IdlType, len(account.PDA.Seeds))
 
 			var seedProgramValue *[]byte
 			if account.PDA.Program != nil {
 				if account.PDA.Program.Value == nil {
-					panic("cannot handle non-const type program value in PDA seeds")
+					panic("cannot handle non-const type program value in PDA seeds" + account.Address)
 				}
 				seedProgramValue = &account.PDA.Program.Value
 			}
@@ -1515,17 +1591,69 @@ func genAccountGettersSetters(
 				if seedDef.Value != nil { // type: const
 					seedValues[i] = seedDef.Value
 				} else {
+					// First check if it's an account reference
 					for _, acc := range accounts {
 						if acc.IdlAccount.Name == seedDef.Path {
 							seedRefs[i] = ToLowerCamel(acc.IdlAccount.Name)
 							continue OUTER
 						}
-						if seedDef.Kind == "arg" {
-							seedArgs[i] = ToCamel(seedDef.Path)
+					}
+
+					for _, argv := range args {
+						argvName := strings.TrimPrefix(argv.Name, "_")
+						if argvName == seedDef.Path {
+
+							seedRefs[i] = ToLowerCamel(argv.Name)
+							seedTypes[i] = argv.Type
 							continue OUTER
 						}
 					}
-					panic("cannot find related account path " + seedDef.Path)
+
+					// Then check if it's an argument field reference
+					parts := strings.Split(seedDef.Path, ".")
+					if len(parts) == 2 {
+						// Find the argument type
+						var argType IdlType
+						for _, arg := range args {
+							if arg.Name == parts[0] {
+								// Found the argument, now need to find the field type
+								if arg.Type.IsIdlTypeDefined() {
+									// Look up the defined type
+									definedType := idl.Types.GetByName(arg.Type.GetIdlTypeDefined().Defined.Name)
+									if definedType != nil && definedType.Type.Fields != nil {
+										// Find the field
+										for _, field := range *definedType.Type.Fields {
+											if field.Name == parts[1] {
+												argType = field.Type
+												break
+											}
+										}
+									}
+								}
+								break
+							}
+						}
+						for _, typ := range idl.Types {
+							if typ.Name == seedDef.Account {
+								for _, field := range *typ.Type.Fields {
+									if field.Name == parts[1] {
+										argType = field.Type
+										break
+									}
+								}
+							}
+						}
+
+						paramName := ToLowerCamel(parts[0] + "_" + parts[1])
+
+						seedTypes[i] = argType
+
+						// Update the function signature to use the correct type
+						seedRefs[i] = paramName
+						continue OUTER
+					}
+
+					panic(fmt.Sprintf("cannot find related account or argument path %q", seedDef.Path))
 				}
 			}
 
@@ -1534,9 +1662,15 @@ func genAccountGettersSetters(
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						for _, seedRef := range seedRefs {
+						for i, seedRef := range seedRefs {
 							if seedRef != "" {
-								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+									params.Id(seedRef).Index(Lit(32)).Byte()
+								} else if seedTypes[i].asString == "i64" {
+									params.Id(seedRef).Index(Lit(8)).Byte()
+								} else {
+									params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								}
 							}
 						}
 						params.Id("knownBumpSeed").Uint8()
@@ -1556,15 +1690,8 @@ func genAccountGettersSetters(
 
 					for i, seedValue := range seedValues {
 						if seedValue != nil {
-							if utf8.Valid(seedValue) {
-								if bytes.Equal(seedValue, make([]byte, len(seedValue))) {
-									body.Comment("const: Pubkey.Default{}")
-								} else {
-									body.Commentf("const: %s", string(seedValue))
-								}
-							} else {
-								body.Commentf("const (raw): %+v", seedValue)
-							}
+							//body.Commentf("const: %s", string(seedValue))
+							body.Commentf("const: 0x%s", hex.EncodeToString(seedValue))
 							body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
 								for _, v := range seedValue {
 									group.LitByte(v)
@@ -1572,21 +1699,13 @@ func genAccountGettersSetters(
 							})))
 						} else {
 							seedRef := seedRefs[i]
-							if seedRef != "" {
-								body.Commentf("path: %s", seedRef)
+							body.Commentf("path: %s", seedRef)
+							if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Index(Op(":")))) // Just pass the byte array directly
+							} else if seedTypes[i].asString == "i64" {
+								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Index(Op(":"))))
+							} else {
 								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Dot("Bytes").Call()))
-							}
-							seedArg := seedArgs[i]
-							if seedArg != "" {
-								body.Commentf("arg: %s", seedArg)
-								seedArgName := ToLowerCamel(seedArg + "Seed")
-								body.Add(Id(seedArgName).Op(",").Id("err").Op(":=").Qual(PkgMsgpack, "Marshal").Call(Id("inst").Op(".").Id(seedArg)))
-								body.If(
-									Err().Op("!=").Nil(),
-								).Block(
-									Return(),
-								)
-								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedArgName)))
 							}
 						}
 					}
@@ -1628,9 +1747,15 @@ func genAccountGettersSetters(
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						for _, seedRef := range seedRefs {
+						for i, seedRef := range seedRefs {
 							if seedRef != "" {
-								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+									params.Id(seedRef).Index(Lit(32)).Byte()
+								} else if seedTypes[i].asString == "i64" {
+									params.Id(seedRef).Index(Lit(8)).Byte()
+								} else {
+									params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								}
 							}
 						}
 						params.Id("bumpSeed").Uint8()
@@ -1662,9 +1787,15 @@ func genAccountGettersSetters(
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						for _, seedRef := range seedRefs {
+						for i, seedRef := range seedRefs {
 							if seedRef != "" {
-								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+									params.Id(seedRef).Index(Lit(32)).Byte()
+								} else if seedTypes[i].asString == "i64" {
+									params.Id(seedRef).Index(Lit(8)).Byte()
+								} else {
+									params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								}
 							}
 						}
 						params.Id("bumpSeed").Uint8()
@@ -1699,9 +1830,15 @@ func genAccountGettersSetters(
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						for _, seedRef := range seedRefs {
+						for i, seedRef := range seedRefs {
 							if seedRef != "" {
-								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+									params.Id(seedRef).Index(Lit(32)).Byte()
+								} else if seedTypes[i].asString == "i64" {
+									params.Id(seedRef).Index(Lit(8)).Byte()
+								} else {
+									params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								}
 							}
 						}
 					}),
@@ -1733,9 +1870,15 @@ func genAccountGettersSetters(
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						for _, seedRef := range seedRefs {
+						for i, seedRef := range seedRefs {
 							if seedRef != "" {
-								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
+									params.Id(seedRef).Index(Lit(32)).Byte()
+								} else if seedTypes[i].asString == "i64" {
+									params.Id(seedRef).Index(Lit(8)).Byte()
+								} else {
+									params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+								}
 							}
 						}
 					}),
