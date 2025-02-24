@@ -384,11 +384,12 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil()))
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil())) // TODO: ..
 		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil()))
+		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc/jsonrpc", "RPCError").Op("=").Nil()))
 		file.Add(Empty().Id(`
 type Event struct {
 	Name string
 	Data EventData
-}
+}	
 
 type EventData interface {
 	UnmarshalWithDecoder(decoder *ag_binary.Decoder) error
@@ -831,7 +832,11 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 							seeds := make([]Code, 0)
 							for _, seed := range account.PDA.Seeds {
 								if seed.Kind == "const" {
-									seeds = append(seeds, Lit(string(seed.Value)))
+									seeds = append(seeds, Index().Byte().ValuesFunc(func(group *Group) {
+										for _, v := range seed.Value {
+											group.LitByte(v)
+										}
+									}))
 								} else if seed.Kind == "account" {
 									address, ok := accountAddresses[seed.Path]
 									if !ok {
@@ -1765,21 +1770,24 @@ func genAccountGettersSetters(
 								} else {
 									body.Commentf("const: %s", string(seedValue))
 								}
+								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
+									for _, b := range seedValue {
+										group.LitByte(b)
+									}
+								})))
 							} else {
 								body.Commentf("const (raw): %+v", seedValue)
+								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
+									for _, v := range seedValue {
+										group.LitByte(v)
+									}
+								})))
 							}
-							body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
-								for _, v := range seedValue {
-									group.LitByte(v)
-								}
-							})))
 						} else {
 							seedRef := seedRefs[i]
 							body.Commentf("path: %s", seedRef)
 							if seedTypes[i].IsArray() && seedTypes[i].GetArray().Elem.GetString() == "u8" {
-								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Index(Op(":")))) // Just pass the byte array directly
-							} else if seedTypes[i].asString == "i64" {
-								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Index(Op(":"))))
+								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Index())) // Just pass the byte array directly
 							} else {
 								body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Dot("Bytes").Call()))
 							}
