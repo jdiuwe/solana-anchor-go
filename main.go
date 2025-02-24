@@ -381,12 +381,12 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		file.Add(Var().Defs(
 			Id("_").Op("*").Qual("strings", "Builder").Op("=").Nil(),
 			Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil(),
-			Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgBinary, "Decoder").Op("=").Nil(),
 			Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go", "PublicKey").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc", "GetTransactionResult").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc/jsonrpc", "RPCError").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/mr-tron/base58", "Alphabet").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgSolanaGo, "PublicKey").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgSolanaGoRpc, "GetTransactionResult").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgSolanaGoRpcJsonrpc, "RPCError").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgBase58, "Alphabet").Op("=").Nil(),
 		))
 		file.Add(Empty().Id(`
 type Event struct {
@@ -730,6 +730,7 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 		{
 			{
 				code := Empty()
+				code.Comment("isEventData is a marker function to indicate that this struct is an event data struct.").Line()
 				code.Func().Params(Id("u").Op("*").Id(insExportedName)).Id("isEventData").Params().Block()
 				file.Add(code.Line())
 			}
@@ -1086,7 +1087,7 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 								TypeIDUvarint32,
 							},
 							func() {
-								typeIDCode = Qual(PkgDfuseBinary, "TypeIDFromUvarint32").Call(Id("Instruction_" + insExportedName))
+								typeIDCode = Qual(PkgBinary, "TypeIDFromUvarint32").Call(Id("Instruction_" + insExportedName))
 							},
 						).
 						On(
@@ -1094,7 +1095,7 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 								TypeIDUint32,
 							},
 							func() {
-								typeIDCode = Qual(PkgDfuseBinary, "TypeIDFromUint32").Call(Id("Instruction_"+insExportedName), Qual("encoding/binary", "LittleEndian"))
+								typeIDCode = Qual(PkgBinary, "TypeIDFromUint32").Call(Id("Instruction_"+insExportedName), Qual("encoding/binary", "LittleEndian"))
 							},
 						).
 						On(
@@ -1102,7 +1103,7 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 								TypeIDUint8,
 							},
 							func() {
-								typeIDCode = Qual(PkgDfuseBinary, "TypeIDFromUint8").Call(Id("Instruction_" + insExportedName))
+								typeIDCode = Qual(PkgBinary, "TypeIDFromUint8").Call(Id("Instruction_" + insExportedName))
 							},
 						).
 						On(
@@ -1124,7 +1125,7 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 
 					body.Return().Op("&").Id("Instruction").Values(
 						Dict{
-							Id("BaseVariant"): Qual(PkgDfuseBinary, "BaseVariant").Values(
+							Id("BaseVariant"): Qual(PkgBinary, "BaseVariant").Values(
 								Dict{
 									Id("TypeID"): typeIDCode,
 									Id("Impl"):   Id("inst"),
@@ -1574,18 +1575,16 @@ func CreatePDA(programID string, seeds ...[]byte) ag_solanago.PublicKey {
 		file.Add(Var().Defs(
 			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go", "PublicKey").Op("=").Nil(),
 			Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/gagliardetto/binary", "Decoder").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc", "Client").Op("=").Nil(),
-			Id("_").Op("*").Qual("github.com/mr-tron/base58", "Alphabet").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgBinary, "Decoder").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgSolanaGoRpc, "Client").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgBase58, "Alphabet").Op("=").Nil(),
 			Id("_").Op("*").Qual("reflect", "Type").Op("=").Nil(),
 		))
 
 		file.Add().Empty().Var().Id("innerInstructionTypes").Op("=").Map(Index(Lit(8)).Byte()).Qual("reflect", "Type").Values(DictFunc(func(d Dict) {
 			for _, ins := range idl.Instructions {
 				insExportedName := ToCamel(ins.Name)
-
 				d[Id("Instruction_"+insExportedName)] = Id("reflect.TypeOf(" + insExportedName + "{})")
-
 			}
 		}))
 
@@ -2246,7 +2245,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 								}
 								ins.Id("Instruction_" + insExportedName)
 
-								ins.Op("=").Qual(PkgDfuseBinary, "TypeID").Call(
+								ins.Op("=").Qual(PkgBinary, "TypeID").Call(
 									Index(Lit(8)).Byte().Op("{").ListFunc(func(byteGroup *Group) {
 										sighash := bin.SighashTypeID(bin.SIGHASH_GLOBAL_NAMESPACE, toBeHashed)
 										if instruction.Discriminator != nil {
@@ -2320,7 +2319,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 					code := Empty()
 					code.Comment("InstructionIDToName returns the name of the instruction given its ID.").Line()
 					code.Func().Id("InstructionIDToName").
-						Params(Id("id").Qual(PkgDfuseBinary, "TypeID")).
+						Params(Id("id").Qual(PkgBinary, "TypeID")).
 						Params(String()).
 						BlockFunc(func(body *Group) {
 							body.Switch(Id("id")).BlockFunc(func(switchBlock *Group) {
@@ -2349,7 +2348,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 		{ // Base Instruction struct:
 			code := Empty()
 			code.Type().Id("Instruction").Struct(
-				Qual(PkgDfuseBinary, "BaseVariant"),
+				Qual(PkgBinary, "BaseVariant"),
 			)
 			file.Add(code.Line())
 		}
@@ -2384,20 +2383,20 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 					func() {
 
 						code := Empty()
-						code.Var().Id("InstructionImplDef").Op("=").Qual(PkgDfuseBinary, "NewVariantDefinition").
+						code.Var().Id("InstructionImplDef").Op("=").Qual(PkgBinary, "NewVariantDefinition").
 							Parens(DoGroup(func(call *Group) {
 								call.Line()
 
 								switch GetConfig().TypeID {
 								case TypeIDUvarint32:
-									call.Qual(PkgDfuseBinary, "Uvarint32TypeIDEncoding").Op(",").Line()
+									call.Qual(PkgBinary, "Uvarint32TypeIDEncoding").Op(",").Line()
 								case TypeIDUint32:
-									call.Qual(PkgDfuseBinary, "Uint32TypeIDEncoding").Op(",").Line()
+									call.Qual(PkgBinary, "Uint32TypeIDEncoding").Op(",").Line()
 								case TypeIDUint8:
-									call.Qual(PkgDfuseBinary, "Uint8TypeIDEncoding").Op(",").Line()
+									call.Qual(PkgBinary, "Uint8TypeIDEncoding").Op(",").Line()
 								}
 
-								call.Index().Qual(PkgDfuseBinary, "VariantType").
+								call.Index().Qual(PkgBinary, "VariantType").
 									BlockFunc(func(variantBlock *Group) {
 										for _, instruction := range idl.Instructions {
 											// NOTE: using `ToCamel` here:
@@ -2419,12 +2418,12 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 					},
 					func() {
 						code := Empty()
-						code.Var().Id("InstructionImplDef").Op("=").Qual(PkgDfuseBinary, "NewVariantDefinition").
+						code.Var().Id("InstructionImplDef").Op("=").Qual(PkgBinary, "NewVariantDefinition").
 							Parens(DoGroup(func(call *Group) {
 								call.Line()
-								call.Qual(PkgDfuseBinary, "AnchorTypeIDEncoding").Op(",").Line()
+								call.Qual(PkgBinary, "AnchorTypeIDEncoding").Op(",").Line()
 
-								call.Index().Qual(PkgDfuseBinary, "VariantType").
+								call.Index().Qual(PkgBinary, "VariantType").
 									BlockFunc(func(variantBlock *Group) {
 										for _, instruction := range idl.Instructions {
 											// NOTE: using `ToSnakeForSighash` here (necessary for sighash computing from instruction name)
@@ -2494,7 +2493,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 					body.Id("buf").Op(":=").New(Qual("bytes", "Buffer"))
 
 					body.If(
-						Err().Op(":=").Qual(PkgDfuseBinary, GetConfig().Encoding._NewEncoder()).Call(Id("buf")).Dot("Encode").Call(Id("inst")).
+						Err().Op(":=").Qual(PkgBinary, GetConfig().Encoding._NewEncoder()).Call(Id("buf")).Dot("Encode").Call(Id("inst")).
 							Op(";").
 							Err().Op("!=").Nil(),
 					).Block(
@@ -2534,7 +2533,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						params.Id("decoder").Op("*").Qual(PkgDfuseBinary, "Decoder")
+						params.Id("decoder").Op("*").Qual(PkgBinary, "Decoder")
 					}),
 				).
 				Params(
@@ -2556,7 +2555,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
-						params.Id("encoder").Op("*").Qual(PkgDfuseBinary, "Encoder")
+						params.Id("encoder").Op("*").Qual(PkgBinary, "Encoder")
 					}),
 				).
 				Params(
@@ -2669,7 +2668,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 					body.Id("inst").Op(":=").New(Id("Instruction"))
 
 					body.If(
-						Err().Op(":=").Qual(PkgDfuseBinary, GetConfig().Encoding._NewDecoder()).Call(Id("data")).Dot("Decode").Call(Id("inst")).
+						Err().Op(":=").Qual(PkgBinary, GetConfig().Encoding._NewDecoder()).Call(Id("data")).Dot("Decode").Call(Id("inst")).
 							Op(";").
 							Err().Op("!=").Nil(),
 					).Block(
