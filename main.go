@@ -378,13 +378,16 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 			}
 		})))
 
-		// TODO: refactor it
-		// to generate import statements
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("strings", "Builder").Op("=").Nil()))
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil()))
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil())) // TODO: ..
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil()))
-		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc/jsonrpc", "RPCError").Op("=").Nil()))
+		file.Add(Var().Defs(
+			Id("_").Op("*").Qual("strings", "Builder").Op("=").Nil(),
+			Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil(),
+			Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil(),
+			Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go", "PublicKey").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc", "GetTransactionResult").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc/jsonrpc", "RPCError").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/mr-tron/base58", "Alphabet").Op("=").Nil(),
+		))
 		file.Add(Empty().Id(`
 type Event struct {
 	Name string
@@ -722,6 +725,14 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 			})
 
 			file.Add(code.Line())
+		}
+
+		{
+			{
+				code := Empty()
+				code.Func().Params(Id("u").Op("*").Id(insExportedName)).Id("isEventData").Params().Block()
+				file.Add(code.Line())
+			}
 		}
 
 		{
@@ -1544,7 +1555,7 @@ func CreatePDA(programID string, seeds ...[]byte) ag_solanago.PublicKey {
 `))
 
 		files = append(files, &FileWrapper{
-			Name: "pdas",
+			Name: "programderivedaccounts",
 			File: file,
 		})
 	}
@@ -1555,6 +1566,111 @@ func CreatePDA(programID string, seeds ...[]byte) ag_solanago.PublicKey {
 			return nil, err
 		}
 		files = append(files, testFiles...)
+	}
+
+	{
+		file := NewGoFile(idl.Metadata.Name, false)
+		// to generate import statements
+		file.Add(Var().Defs(
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go", "PublicKey").Op("=").Nil(),
+			Id("_").Op("*").Qual("fmt", "Formatter").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/binary", "Decoder").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc", "Client").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/mr-tron/base58", "Alphabet").Op("=").Nil(),
+			Id("_").Op("*").Qual("reflect", "Type").Op("=").Nil(),
+		))
+
+		file.Add().Empty().Var().Id("innerInstructionTypes").Op("=").Map(Index(Lit(8)).Byte()).Qual("reflect", "Type").Values(DictFunc(func(d Dict) {
+			for _, ins := range idl.Instructions {
+				insExportedName := ToCamel(ins.Name)
+
+				d[Id("Instruction_"+insExportedName)] = Id("reflect.TypeOf(" + insExportedName + "{})")
+
+			}
+		}))
+
+		file.Add(Empty().Var().Id("innerInstructionToNames").Op("=").Map(Index(Lit(8)).Byte()).String().Values(DictFunc(func(d Dict) {
+			for _, ins := range idl.Instructions {
+				insExportedName := ToCamel(ins.Name)
+				d[Id("Instruction_"+insExportedName)] = Lit(ins.Name)
+			}
+		})))
+
+		file.Add(Empty().Var().Id("innerInstructionToEventName").Op("=").Map(Index(Lit(8)).Byte()).String().Values(DictFunc(func(d Dict) {
+			for _, ins := range idl.Instructions {
+				insExportedName := ToCamel(ins.Name)
+				d[Id("Instruction_"+insExportedName)] = Lit(ToCamel(ins.Name))
+			}
+		})))
+
+		file.Add().Empty().Id(
+			`
+
+type InnerInstructionEvent struct {
+	Name     string
+	Data     EventData
+}
+
+func DecodeInnerInstructions(txData *ag_rpc.GetTransactionResult, targetProgramId ag_solanago.PublicKey) (events []*InnerInstructionEvent, err error) {
+	var innerInstructions []*InnerInstructionEvent
+
+	var tx *ag_solanago.Transaction
+	if tx, err = txData.Transaction.GetTransaction(); err != nil {
+		return nil, err
+	}
+
+	for _, innerInstruction := range txData.Meta.InnerInstructions {
+		for _, instruction := range innerInstruction.Instructions {
+			if tx.Message.AccountKeys[instruction.ProgramIDIndex] != targetProgramId {
+				continue
+			}
+
+			rawData, err := ag_base58.Decode(instruction.Data.String())
+			if err != nil {
+				return nil, fmt.Errorf("error decoding instruction data from Base58: %w", err)
+			}
+
+
+			discriminator := ag_binary.TypeID(rawData[:8])
+
+			if eventType, ok := innerInstructionTypes[discriminator]; ok {
+				eventData := reflect.New(eventType).Interface().(EventData)
+				decoder := ag_binary.NewBorshDecoder(rawData[8:])
+				if err := decoder.Decode(eventData); err != nil {
+					return nil, fmt.Errorf("error decoding instruction: %w", err)
+				}
+				event := &InnerInstructionEvent{
+					Name:     innerInstructionToEventName[discriminator],
+					Data:     eventData,
+				}
+
+				accounts:= make(ag_solanago.AccountMetaSlice, len(instruction.Accounts))
+				for i, accIndex := range instruction.Accounts {
+					accounts[i] = &ag_solanago.AccountMeta{PublicKey: tx.Message.AccountKeys[accIndex]}
+				}
+
+				// add accounts to event
+				if v, ok:= event.Data.(ag_solanago.AccountsSettable); ok {
+					err := v.SetAccounts(accounts)
+					if err != nil {
+						return nil, fmt.Errorf("error setting accounts for instruction: %w", err)
+					}
+				} 
+				
+				innerInstructions = append(innerInstructions, event)
+			}
+		}
+	}
+
+	return innerInstructions, nil
+}
+
+`)
+
+		files = append(files, &FileWrapper{
+			Name: "innerinstructions",
+			File: file,
+		})
 	}
 
 	return files, nil
